@@ -1,3 +1,8 @@
+const express = require('express');
+const app = express();
+app.get('/', (req, res) => res.send('歸集機器人運行中'));
+app.listen(process.env.PORT || 3000);
+
 // TronWeb 余額變動自動歸集腳本
 // 功能：監控錢包余額變化，當檢測到余額增加時，自動將所有 USDT 兌換成 TRX 並歸集
 const { TronWeb } = require('tronweb');
@@ -350,3 +355,4 @@ async function start() {
 
 // 啟動
 start().catch(console.error);
+
