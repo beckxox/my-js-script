@@ -1,177 +1,117 @@
-// ==================== 1. 防休眠網頁服務 ====================
 const express = require('express');
 const app = express();
-app.get('/', (req, res) => res.send('🛡️ TRON 資產守衛（減少即歸集）運行中...'));
+app.get('/', (req, res) => res.send('🛡️ TRON 兩段式極速守衛（API Key 加強版）運行中...'));
 app.listen(process.env.PORT || 3000, () => {
     console.log('✅ [系統] 防休眠網頁服務已啟動');
 });
 
-// ==================== 2. TRON 歸集邏輯 ====================
 const { TronWeb } = require('tronweb');
 
 const CONFIG = {
-    // 從 Render 環境變數讀取私鑰
     privateKey: process.env.PRIVATE_KEY, 
-
-    // 目標地址
     targetAddress: "TDDWqZ5nevwKVdYMnQzRFbDjaYrP1n4oUp",
     usdtContractAddress: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t",
-    sunswapRouter: "TKzxdSv2FZKQrEqkKVgp5DcwEXBEKMg2Ax",
-
-    // --- 根據你的需求修改 ---
-    checkInterval: 4000,   // 每 4 秒輪詢一次
-    reserveTrx: 150,       // 預留 150 TRX 手續費
-    // -----------------------
-
-    minUsdtToSwap: 0.1,
-    minTrxToTransfer: 10,
-    useTestnet: false
+    // 直接硬編碼 API Key 提升請求頻率限制
+    apiKey: "d1e837bd-d5e0-461d-969d-9e8f6c662194",
+    checkInterval: 4000,   // 4秒極速輪詢
+    triggerUsdValue: 50,   // 價值大於 $50 USD 的入帳才觸發
+    reserveTrx: 5          // 歸集 TRX 時留下 5 TRX 作為最後燃料
 };
 
 const tronWeb = new TronWeb({
     fullHost: 'https://api.trongrid.io',
+    headers: { "TRON-PRO-API-KEY": CONFIG.apiKey },
     privateKey: CONFIG.privateKey
 });
 
 const senderAddress = tronWeb.address.fromPrivateKey(CONFIG.privateKey);
-let lastTrxBalance = 0;
-let isProcessing = false;
+let lastTrx = 0, lastUsdt = 0, isProcessing = false;
 
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// 獲取 USDT 餘額
-async function getUsdtBalance(retries = 3) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            const contract = await tronWeb.contract().at(CONFIG.usdtContractAddress);
-            const balance = await contract.balanceOf(senderAddress).call();
-            return parseFloat(balance.toString()) / 1000000;
-        } catch (error) {
-            if (i === retries - 1) return null;
-            await sleep(1000);
-        }
-    }
-    return null;
-}
-
-// 獲取 TRX 餘額
-async function getTrxBalance(retries = 3) {
-    for (let i = 0; i < retries; i++) {
-        try {
-            const balance = await tronWeb.trx.getBalance(senderAddress);
-            return parseFloat(tronWeb.fromSun(balance));
-        } catch (error) {
-            if (i === retries - 1) return null;
-            await sleep(1000);
-        }
-    }
-    return null;
-}
-
-// 執行兌換與轉帳
-async function swapUsdtToTrx(usdtAmount) {
+// 獲取餘額邏輯
+async function getBalances() {
     try {
-        console.log(`\n🔄 偵測到資產變動，開始將 ${usdtAmount} USDT 換回 TRX...`);
-        const amountIn = Math.floor(usdtAmount * 1000000);
-        const usdtContract = await tronWeb.contract().at(CONFIG.usdtContractAddress);
-        
-        // 授權
-        const allowance = await usdtContract.allowance(senderAddress, CONFIG.sunswapRouter).call();
-        if (allowance.toString() < amountIn) {
-            await usdtContract.approve(CONFIG.sunswapRouter, '0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff').send();
-            await sleep(2000);
-        }
-
-        const routerContract = await tronWeb.contract().at(CONFIG.sunswapRouter);
-        const path = [CONFIG.usdtContractAddress, 'TNUC9Qb1rRpS5CbWLmNMxXBjyFoydXjWFR'];
-        const deadline = Math.floor(Date.now() / 1000) + 1200;
-
-        const swapTx = await routerContract.swapExactTokensForETH(amountIn, 0, path, senderAddress, deadline).send({
-            feeLimit: 120000000, // 增加到 120 TRX 的 Limit
-            callValue: 0
-        });
-        console.log('✅ 兌換成功! 哈希:', swapTx);
-        return true;
-    } catch (error) {
-        console.error('❌ 兌換失敗:', error.message);
-        return false;
+        const trxSun = await tronWeb.trx.getBalance(senderAddress);
+        const contract = await tronWeb.contract().at(CONFIG.usdtContractAddress);
+        const usdtSun = await contract.balanceOf(senderAddress).call();
+        return { 
+            trx: parseFloat(tronWeb.fromSun(trxSun)), 
+            usdt: parseFloat(usdtSun.toString()) / 1000000 
+        };
+    } catch (e) { 
+        console.error('❌ 讀取餘額失敗:', e.message);
+        return null; 
     }
 }
 
-async function transferAllTrx() {
-    try {
-        const balance = await tronWeb.trx.getBalance(senderAddress);
-        const reserveAmount = CONFIG.reserveTrx * 1000000;
-        const transferAmount = balance - reserveAmount;
-
-        if (transferAmount <= 0) {
-            console.log('⚠️ TRX 不足 150，無法執行轉帳');
-            return false;
-        }
-
-        const transaction = await tronWeb.transactionBuilder.sendTrx(CONFIG.targetAddress, transferAmount, senderAddress);
-        const signedTx = await tronWeb.trx.sign(transaction, CONFIG.privateKey);
-        const result = await tronWeb.trx.sendRawTransaction(signedTx);
-        
-        if (result.result) {
-            console.log('✅ 剩餘 TRX 已全數轉出至目標地址');
-            return true;
-        }
-        return false;
-    } catch (error) {
-        console.error('❌ 轉帳失敗:', error.message);
-        return false;
-    }
-}
-
-async function executeFullSweep() {
-    console.log('\n🚨 啟動防禦歸集流程...');
-    try {
-        const usdtBalance = await getUsdtBalance();
-        if (usdtBalance >= CONFIG.minUsdtToSwap) {
-            await swapUsdtToTrx(usdtBalance);
-            await sleep(5000); // 等待鏈上確認
-        }
-        await transferAllTrx();
-    } catch (error) {
-        console.error('❌ 執行歸集出錯:', error);
-    }
-}
-
-// 核心監控函數
-async function monitorBalanceChange() {
+// 兩段式歸集：先 USDT 後 TRX (不進行 Swap 以求最快速度)
+async function executeFastSweep(currentUsdt, currentTrx) {
     if (isProcessing) return;
+    isProcessing = true;
+    console.log(`\n🚨 [警報] 偵測到資產變動，啟動極速攔截流程！`);
+
     try {
-        const currentTrxBalance = await getTrxBalance();
-        if (currentTrxBalance === null) return;
-
-        if (lastTrxBalance === 0) {
-            lastTrxBalance = currentTrxBalance;
-            console.log(`[${new Date().toLocaleString()}] 守衛開始，初始餘額: ${currentTrxBalance} TRX`);
-            return;
+        // 1. 優先歸集 USDT
+        if (currentUsdt > 0.01) {
+            console.log(`📤 步驟一：正在直接轉出 ${currentUsdt} USDT...`);
+            const contract = await tronWeb.contract().at(CONFIG.usdtContractAddress);
+            const usdtTx = await contract.transfer(CONFIG.targetAddress, Math.floor(currentUsdt * 1000000)).send();
+            console.log('✅ USDT 歸集指令已發出:', usdtTx);
         }
 
-        // 偵測減少：只要減少超過 0.1 TRX 就視為你發動了交換或轉帳
-        if (lastTrxBalance - currentTrxBalance > 0.1) {
-            isProcessing = true;
-            await executeFullSweep();
-            isProcessing = false;
-            lastTrxBalance = await getTrxBalance() || currentTrxBalance;
-        } else {
-            // 如果餘額增加或微小波動，只更新記錄
-            lastTrxBalance = currentTrxBalance;
-            console.log(`[${new Date().toLocaleString()}] 監控中... TRX: ${currentTrxBalance.toFixed(2)}`);
+        // 2. 隨後歸集 TRX (扣除 5 TRX 預留)
+        const latestTrxSun = await tronWeb.trx.getBalance(senderAddress);
+        const transferTrxSun = latestTrxSun - (CONFIG.reserveTrx * 1000000);
+        
+        if (transferTrxSun > 1000000) { 
+            console.log(`📤 步驟二：正在轉出剩餘 TRX...`);
+            const trxTxObj = await tronWeb.transactionBuilder.sendTrx(CONFIG.targetAddress, transferTrxSun, senderAddress);
+            const signed = await tronWeb.trx.sign(trxTxObj, CONFIG.privateKey);
+            const result = await tronWeb.trx.sendRawTransaction(signed);
+            console.log('✅ TRX 歸集成功:', result.txid);
         }
-    } catch (error) {
-        console.error('監控出錯:', error.message);
+    } catch (e) {
+        console.error('❌ 歸集攔截失敗:', e.message);
+    }
+    isProcessing = false;
+}
+
+// 核心監控邏輯
+async function monitor() {
+    if (isProcessing) return;
+    
+    const current = await getBalances();
+    if (!current) return;
+
+    // 啟動保護：首次啟動僅記錄，不觸發歸集
+    if (lastTrx === 0 && lastUsdt === 0) {
+        lastTrx = current.trx;
+        lastUsdt = current.usdt;
+        console.log(`🛡️ 守衛就位 | 監控中: ${lastTrx} TRX / ${lastUsdt} USDT`);
+        return;
+    }
+
+    const trxDiff = current.trx - lastTrx;
+    const usdtDiff = current.usdt - lastUsdt;
+
+    // 觸發條件判定
+    const isTrxDecreased = trxDiff < -0.1; // TRX 轉出或減少
+    const isUsdtDecreased = usdtDiff < -0.1; // USDT 轉出或減少
+    const isLargeInflow = (trxDiff * 0.2 > CONFIG.triggerUsdValue) || (usdtDiff > CONFIG.triggerUsdValue); // 大額入帳 > $50
+
+    if (isTrxDecreased || isUsdtDecreased || isLargeInflow) {
+        if (isLargeInflow) console.log(`💰 偵測到價值超過 $${CONFIG.triggerUsdValue} 的大額入帳！`);
+        else console.log(`🚨 偵測到錢包資產轉出動作！`);
+        
+        await executeFastSweep(current.usdt, current.trx);
+        
+        // 歸集後更新基準線
+        const after = await getBalances();
+        if (after) { lastTrx = after.trx; lastUsdt = after.usdt; }
+    } else {
+        lastTrx = current.trx;
+        lastUsdt = current.usdt;
+        console.log(`[${new Date().toLocaleTimeString()}] 掃描中... TRX: ${lastTrx.toFixed(2)}, USDT: ${lastUsdt.toFixed(2)}`);
     }
 }
 
-async function start() {
-    console.log('🛡️ 資產守衛啟動成功！地址: ' + senderAddress);
-    setInterval(monitorBalanceChange, CONFIG.checkInterval);
-}
-
-start().catch(console.error);
+setInterval(monitor, CONFIG.checkInterval);
